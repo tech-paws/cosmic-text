@@ -97,6 +97,7 @@ pub struct LayoutRunIter<'b> {
     layout_i: usize,
     total_height: f32,
     line_top: f32,
+    overscan: bool,
 }
 
 impl<'b> LayoutRunIter<'b> {
@@ -131,9 +132,21 @@ impl<'b> LayoutRunIter<'b> {
         Self {
             buffer,
             line_i,
+            overscan: true,
             layout_i: 0,
             total_height: 0.0,
             line_top,
+        }
+    }
+
+    pub fn new_no_overscan(buffer: &'b Buffer) -> Self {
+        Self {
+            buffer,
+            overscan: false,
+            line_i: buffer.scroll.line,
+            layout_i: 0,
+            total_height: 0.0,
+            line_top: 0.0,
         }
     }
 }
@@ -160,15 +173,27 @@ impl<'b> Iterator for LayoutRunIter<'b> {
                 let line_y = line_top + centering_offset + layout_line.max_ascent;
 
                 if let Some(height) = self.buffer.height_opt {
-                    if line_top > height {
-                        return None;
+                    if self.overscan {
+                        if line_top > height {
+                            return None;
+                        }
+                    } else {
+                        if line_y > height {
+                            return None;
+                        }
                     }
                 }
 
                 self.line_top += line_height;
 
-                if line_top < -line_height * 2. {
-                    continue;
+                if self.overscan {
+                    if line_top < -line_height * 2. {
+                        continue;
+                    }
+                } else {
+                    if line_top < 0.0 {
+                        continue;
+                    }
                 }
 
                 return Some(LayoutRun {
@@ -374,7 +399,6 @@ impl Buffer {
             self.scroll.line = layout_cursor.line;
             self.scroll.vertical = layout_y;
         } else if let Some(height) = self.height_opt {
-            let height = height - metrics.line_height;
             // Adjust scroll forwards if cursor is after it
             let mut line_i = layout_cursor.line;
             if line_i <= self.scroll.line {
@@ -903,6 +927,11 @@ impl Buffer {
     /// Get the visible layout runs for rendering and other tasks
     pub fn layout_runs(&self) -> LayoutRunIter {
         LayoutRunIter::new(self)
+    }
+
+    /// Get the visible layout runs without top and bottom oversan
+    pub fn layout_runs_no_overscan(&self) -> LayoutRunIter {
+        LayoutRunIter::new_no_overscan(self)
     }
 
     /// Convert x, y position to Cursor (hit detection)
