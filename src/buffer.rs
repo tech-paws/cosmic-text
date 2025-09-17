@@ -101,12 +101,39 @@ pub struct LayoutRunIter<'b> {
 
 impl<'b> LayoutRunIter<'b> {
     pub fn new(buffer: &'b Buffer) -> Self {
+        let mut line_i = buffer.scroll.line;
+        let mut line_top = 0.0;
+
+        if line_i > 0 {
+            let prev_layout = buffer
+                .lines
+                .get(line_i - 1)
+                .and_then(|buffer_line| buffer_line.layout_opt());
+
+            if let Some(prev_layout) = prev_layout {
+                if !prev_layout.is_empty() {
+                    // Sum all wrapped layout lines for that paragraph
+                    let prev_h: f32 = prev_layout
+                        .iter()
+                        .map(|line| line.line_height_opt.unwrap_or(buffer.metrics.line_height))
+                        .sum();
+
+                    if prev_h != 0.0 && prev_h.is_finite() {
+                        line_i -= 1;
+
+                        // place previous paragraph just above the viewport
+                        line_top -= prev_h;
+                    }
+                }
+            }
+        }
+
         Self {
             buffer,
-            line_i: buffer.scroll.line,
+            line_i,
             layout_i: 0,
             total_height: 0.0,
-            line_top: 0.0,
+            line_top,
         }
     }
 }
@@ -118,6 +145,7 @@ impl<'b> Iterator for LayoutRunIter<'b> {
         while let Some(line) = self.buffer.lines.get(self.line_i) {
             let shape = line.shape_opt()?;
             let layout = line.layout_opt()?;
+
             while let Some(layout_line) = layout.get(self.layout_i) {
                 self.layout_i += 1;
 
@@ -130,13 +158,16 @@ impl<'b> Iterator for LayoutRunIter<'b> {
                 let glyph_height = layout_line.max_ascent + layout_line.max_descent;
                 let centering_offset = (line_height - glyph_height) / 2.0;
                 let line_y = line_top + centering_offset + layout_line.max_ascent;
+
                 if let Some(height) = self.buffer.height_opt {
-                    if line_y > height {
+                    if line_top > height {
                         return None;
                     }
                 }
+
                 self.line_top += line_height;
-                if line_y < 0.0 {
+
+                if line_top < -line_height * 2. {
                     continue;
                 }
 
@@ -479,6 +510,10 @@ impl Buffer {
                 // Done adjusting scroll
                 break;
             }
+        }
+
+        if self.scroll.line > 0 {
+            self.line_layout(font_system, self.scroll.line - 1);
         }
 
         if old_scroll != self.scroll {
