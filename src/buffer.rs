@@ -374,6 +374,7 @@ impl Buffer {
             self.scroll.line = layout_cursor.line;
             self.scroll.vertical = layout_y;
         } else if let Some(height) = self.height_opt {
+            let height = height - metrics.line_height;
             // Adjust scroll forwards if cursor is after it
             let mut line_i = layout_cursor.line;
             if line_i <= self.scroll.line {
