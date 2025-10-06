@@ -462,7 +462,7 @@ impl Buffer {
 
     /// Shape lines until scroll
     #[allow(clippy::missing_panics_doc)]
-    pub fn shape_until_scroll(&mut self, font_system: &mut FontSystem, prune: bool) {
+    pub fn shape_until_scroll_old(&mut self, font_system: &mut FontSystem, prune: bool) {
         let metrics = self.metrics;
         let old_scroll = self.scroll;
 
@@ -483,6 +483,7 @@ impl Buffer {
                         // If layout is missing, just assume line height
                         self.scroll.line = line_i;
                         self.scroll.vertical += metrics.line_height;
+                        println!("TEST");
                     }
                 } else {
                     self.scroll.vertical = 0.0;
@@ -537,6 +538,167 @@ impl Buffer {
             }
         }
 
+        if self.scroll.line > 0 {
+            self.line_layout(font_system, self.scroll.line - 1);
+        }
+
+        if old_scroll != self.scroll {
+            self.redraw = true;
+        }
+    }
+
+    // Local helper to compute total (wrapped) height of a paragraph line.
+    fn line_height_of(&mut self, font_system: &mut FontSystem, line_i: usize) -> f32 {
+        let line_height = self.metrics.line_height;
+
+        if let Some(layout) = self.line_layout(font_system, line_i) {
+            let mut h = 0.0;
+            for ll in layout.iter() {
+                let lh = ll.line_height_opt.unwrap_or(line_height);
+                if lh.is_finite() && lh > 0.0 {
+                    h += lh;
+                }
+            }
+            if h.is_finite() && h > 0.0 {
+                h
+            } else {
+                line_height
+            }
+        } else {
+            line_height
+        }
+    }
+
+    /// Shape lines until scroll
+    #[allow(clippy::missing_panics_doc)]
+    pub fn shape_until_scroll(&mut self, font_system: &mut FontSystem, prune: bool) {
+        let metrics = self.metrics;
+        let old_scroll = self.scroll;
+        const EPS: f32 = 0.5;
+
+        let line_count = self.lines.len();
+        if line_count == 0 {
+            // Nothing to do; just stabilize.
+            self.scroll.line = 0;
+            self.scroll.vertical = 0.0;
+            if old_scroll != self.scroll {
+                self.redraw = true;
+            }
+            return;
+        }
+
+        // Clamp line inside buffer
+        if self.scroll.line >= line_count {
+            self.scroll.line = line_count.saturating_sub(1);
+            self.scroll.vertical = 0.0;
+        }
+
+        // ---- A) Fix negative vertical by walking upward
+        while self.scroll.vertical < 0.0 && self.scroll.line > 0 {
+            let prev = self.scroll.line - 1;
+            let ph = self.line_height_of(font_system, prev);
+            self.scroll.line = prev;
+            self.scroll.vertical += ph;
+        }
+
+        if self.scroll.vertical < 0.0 {
+            self.scroll.vertical = 0.0;
+        }
+
+        // ---- B) Ensure 0 ≤ vertical < height(first visible line)
+        let mut first_h = self.line_height_of(font_system, self.scroll.line);
+
+        while self.scroll.vertical + EPS >= first_h && self.scroll.line + 1 < line_count {
+            self.scroll.vertical -= first_h;
+            self.scroll.line += 1;
+            first_h = self.line_height_of(font_system, self.scroll.line);
+        }
+
+        // If we're on the last line, don't let vertical equal/exceed its height.
+        if self.scroll.line == line_count - 1 && self.scroll.vertical + EPS >= first_h {
+            self.scroll.vertical = (first_h - EPS).max(0.0);
+        }
+
+        // ---- C) Bottom fill: if viewport height exists, make sure we show as much as possible
+        if let Some(height) = self.height_opt {
+            // Remaining needed height after accounting for the visible part of the first line.
+            let mut needed = height - (first_h - self.scroll.vertical).max(0.0);
+
+            // Consume full subsequent lines until the viewport is filled or we run out.
+            let mut i = self.scroll.line + 1;
+
+            while needed > 0.0 && i < line_count {
+                let h = self.line_height_of(font_system, i);
+                needed -= h;
+                i += 1;
+            }
+
+            // If we still need more, shift the view upward deterministically.
+            if needed > 0.0 {
+                let mut deficit = needed;
+
+                // First, use the remaining vertical within the first line.
+                if self.scroll.vertical > 0.0 {
+                    let take = self.scroll.vertical.min(deficit);
+                    self.scroll.vertical -= take;
+                    deficit -= take;
+                }
+
+                // Then, walk up line by line if necessary.
+                while deficit > 0.0 && self.scroll.line > 0 {
+                    self.scroll.line -= 1;
+                    let ph = self.line_height_of(font_system, self.scroll.line);
+                    // Position at the bottom of the previous line, then consume from its vertical.
+                    self.scroll.vertical = ph;
+                    let take = self.scroll.vertical.min(deficit);
+                    self.scroll.vertical -= take;
+                    deficit -= take;
+                }
+
+                // Final clamp at absolute top.
+                if deficit > 0.0 {
+                    self.scroll.line = 0;
+                    self.scroll.vertical = 0.0;
+                }
+
+                // Re-assert vertical < height(first visible line).
+                first_h = self.line_height_of(font_system, self.scroll.line);
+                if self.scroll.vertical + EPS >= first_h {
+                    self.scroll.vertical = (first_h - EPS).max(0.0);
+                }
+            }
+        }
+
+        // ---- D) Shape forward and optionally prune outside the viewport
+        let scroll_start = self.scroll.vertical;
+        let scroll_end = scroll_start + self.height_opt.unwrap_or(f32::INFINITY);
+
+        let mut total = 0.0;
+        for line_i in 0..line_count {
+            if line_i < self.scroll.line {
+                if prune {
+                    self.lines[line_i].reset_shaping();
+                }
+                continue;
+            }
+            if total > scroll_end {
+                if prune {
+                    self.lines[line_i].reset_shaping();
+                    continue;
+                } else {
+                    break;
+                }
+            }
+            // Ensure the line is shaped and accumulate its height.
+            let layout = self
+                .line_layout(font_system, line_i)
+                .expect("shape_until_scroll invalid line");
+            for ll in layout.iter() {
+                total += ll.line_height_opt.unwrap_or(metrics.line_height);
+            }
+        }
+
+        // Pre-shape previous line for smoother overscan.
         if self.scroll.line > 0 {
             self.line_layout(font_system, self.scroll.line - 1);
         }
